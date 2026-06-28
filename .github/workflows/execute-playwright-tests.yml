@@ -1,0 +1,424 @@
+name: Execute Playwright Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      execution_id:
+        description: 'Test Execution ID'
+        required: true
+        type: string
+      test_cycle_id:
+        description: 'Test Cycle ID'
+        required: true
+        type: string
+      workers:
+        description: 'Number of parallel workers'
+        required: false
+        default: '1'
+        type: string
+      browsers:
+        description: 'Space-separated list of browsers (chromium firefox webkit)'
+        required: false
+        default: 'chromium'
+        type: string
+      timeout:
+        description: 'Test timeout in milliseconds'
+        required: false
+        default: '30000'
+        type: string
+      retries:
+        description: 'Number of retries for failed tests'
+        required: false
+        default: '0'
+        type: string
+      action_timeout:
+        description: 'Action timeout in milliseconds (click, fill, etc.). 0 = no timeout (Playwright default)'
+        required: false
+        default: '0'
+        type: string
+      navigation_timeout:
+        description: 'Navigation timeout in milliseconds (goto, etc.). 0 = no timeout (Playwright default)'
+        required: false
+        default: '0'
+        type: string
+      expect_timeout:
+        description: 'Expect assertion timeout in milliseconds'
+        required: false
+        default: '30000'
+        type: string
+      global_timeout:
+        description: 'Global timeout for entire test run in milliseconds (0 = no limit)'
+        required: false
+        default: '0'
+        type: string
+      db_connections:
+        description: 'JSON-encoded database connections config (optional)'
+        required: false
+        default: ''
+        type: string
+      base_url:
+        description: 'Base URL for the test environment'
+        required: false
+        default: ''
+        type: string
+      test_secrets:
+        description: 'JSON-encoded test data secrets (passwords, API keys)'
+        required: false
+        default: ''
+        type: string
+      data_folder:
+        description: 'Environment data subfolder name (e.g., development, qa)'
+        required: false
+        default: ''
+        type: string
+      branch:
+        description: 'Branch to check out and run tests against (defaults to main)'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  # Layer 2 of scaffold integrity enforcement (defense in depth).
+  # The status-check context name is "scaffold-integrity" — this is what the
+  # branch protection rule on main requires. See docs/SCAFFOLD_INTEGRITY.md §4.2.
+  verify-scaffold:
+    name: scaffold-integrity
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 2
+    steps:
+      - name: Verify scaffold integrity
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+        run: |
+          PROJECT_ID="3004"
+          if [ -z "$PROJECT_ID" ]; then
+            echo "::warning::projectId not embedded in workflow; skipping in-workflow verify (layer 1 still enforces)"
+            exit 0
+          fi
+          HTTP=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            "$TAP_API_URL/api/code-repositories/project/$PROJECT_ID/verify-scaffold?sha=$GITHUB_SHA")
+          BODY=$(printf '%s' "$HTTP" | sed '$d')
+          CODE=$(printf '%s' "$HTTP" | tail -n1)
+          if [ "$CODE" = "200" ]; then
+            echo "Scaffold integrity verified at $GITHUB_SHA"
+            exit 0
+          fi
+          echo "::error::Scaffold integrity check failed (HTTP $CODE)"
+          echo "$BODY"
+          exit 1
+
+  execute-tests:
+    needs: verify-scaffold
+    runs-on: [self-hosted, aks]
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          # Explicitly check out the branch the user selected in the
+          # Automation Execution page. We pass the same branch as the
+          # workflow_dispatch `ref` (from githubActionsService.triggerWorkflow)
+          # but pinning it here makes the choice visible in the GH Actions
+          # run summary and decouples "branch the workflow runs from" from
+          # "branch the tests are checked out from" if we ever need to.
+          ref: ${{ inputs.branch || 'main' }}
+
+      - name: Notify TAP - Checkout Complete
+        continue-on-error: true
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+        run: |
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":1,"totalSteps":7,"status":"completed","description":"Repository checked out"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.18.0'
+
+      - name: Notify TAP - Node.js Ready
+        continue-on-error: true
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+        run: |
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":2,"totalSteps":7,"status":"completed","description":"Node.js configured"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+      - name: Fetch Test File List for Cycle
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TEST_CYCLE_ID: ${{ inputs.test_cycle_id }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+        run: |
+          echo "Fetching test file list for cycle $TEST_CYCLE_ID..."
+          RESPONSE=$(curl -sf -H "Authorization: Bearer $TAP_API_KEY" \
+            "$TAP_API_URL/api/automation-executions/cycle/$TEST_CYCLE_ID/test-files")
+
+          if [ $? -ne 0 ]; then
+            echo "Warning: Failed to fetch test files for cycle, will run all tests"
+            echo "TAP_TEST_FILES=" >> $GITHUB_ENV
+          else
+            # Extract .spec.ts file paths from the JSON response
+            TEST_FILES=$(echo "$RESPONSE" | node -e "
+              const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
+              const paths = (data.files || [])
+                .map(f => f.path)
+                .filter(p => p.endsWith('.spec.ts'));
+              process.stdout.write(paths.join(' '));
+            ")
+            echo "Found $(echo "$TEST_FILES" | wc -w | tr -d ' ') test file(s) for cycle"
+            echo "TAP_TEST_FILES=$TEST_FILES" >> $GITHUB_ENV
+          fi
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":3,"totalSteps":7,"status":"completed","description":"Test files fetched"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+      - name: Configure npm registry (JFrog)
+        env:
+          JFROG_AUTH: ${{ secrets.JFROG_AUTH }}
+        run: |
+          REGISTRY="https://krogertechnology.jfrog.io/artifactory/api/npm/npm-repo/"
+          cat > ~/.npmrc <<EOF
+          registry=$REGISTRY
+          @kroger-qa:registry=$REGISTRY
+          //krogertechnology.jfrog.io/artifactory/api/npm/npm-repo/:_auth=$JFROG_AUTH
+          EOF
+
+      - name: Install Dependencies
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
+        run: |
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":4,"totalSteps":7,"status":"in_progress","description":"Installing dependencies"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+          npm install --no-audit
+          npx playwright install ${{ inputs.browsers || 'chromium' }} --with-deps
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":4,"totalSteps":7,"status":"completed","description":"Dependencies installed"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+      - name: Download TAP Reporter
+        env:
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+        run: |
+          curl -f -H "Authorization: Bearer $TAP_API_KEY" \
+            -o tap-reporter.ts \
+            "$TAP_API_URL/api/automation-executions/tap-reporter.ts"
+          echo "TAP reporter downloaded"
+
+          # The reporter/uploader use undici's ProxyAgent to honor HTTPS_PROXY
+          # when the runner is behind the corporate egress proxy. Node's
+          # built-in fetch ignores HTTPS_PROXY, so without undici the POSTs
+          # back to TAP fail with 'fetch failed'.
+          echo "Installing undici for proxy-aware fetch..."
+          npm install --no-save --no-audit --no-fund undici
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":5,"totalSteps":7,"status":"completed","description":"TAP tools downloaded"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+      - name: Execute Playwright Tests
+        id: test-execution
+        continue-on-error: true
+        env:
+          EXECUTION_ID: ${{ inputs.execution_id }}
+          TAP_API_URL: ${{ secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_WORKERS: ${{ inputs.workers || '1' }}
+          TAP_BROWSERS: ${{ inputs.browsers || 'chromium' }}
+          TAP_TIMEOUT: ${{ inputs.timeout || '30000' }}
+          TAP_RETRIES: ${{ inputs.retries || '0' }}
+          TAP_ACTION_TIMEOUT: ${{ inputs.action_timeout || '0' }}
+          TAP_NAVIGATION_TIMEOUT: ${{ inputs.navigation_timeout || '0' }}
+          TAP_EXPECT_TIMEOUT: ${{ inputs.expect_timeout || '30000' }}
+          TAP_GLOBAL_TIMEOUT: ${{ inputs.global_timeout || '0' }}
+          TAP_DB_CONNECTIONS: ${{ inputs.db_connections }}
+          TAP_BASE_URL: ${{ inputs.base_url }}
+          TAP_TEST_SECRETS: ${{ inputs.test_secrets }}
+          TAP_DATA_FOLDER: ${{ inputs.data_folder }}
+        run: |
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            -d '{"step":6,"totalSteps":7,"status":"in_progress","description":"Running tests"}' \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
+
+          # Convert space-separated browsers to JSON array for playwright config
+          BROWSERS_JSON=$(echo "$TAP_BROWSERS" | tr ' ' '\n' | sed 's/.*/"&"/' | paste -sd ',' - | sed 's/^/[/' | sed 's/$/]/')
+          export TAP_BROWSERS="$BROWSERS_JSON"
+
+          echo "Starting test execution (workers: $TAP_WORKERS, browsers: $BROWSERS_JSON)..."
+          if [ -n "$TAP_TEST_FILES" ]; then
+            echo "Running $(echo "$TAP_TEST_FILES" | wc -w | tr -d ' ') specific test files"
+            npx playwright test $TAP_TEST_FILES --workers=${{ inputs.workers || '1' }}
+          else
+            echo "Running all tests"
+            npx playwright test --workers=${{ inputs.workers || '1' }}
+          fi
+          TEST_EXIT_CODE=$?
+          echo "exit_code=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
+          exit $TEST_EXIT_CODE
+
+      - name: Upload Complete Test Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ inputs.execution_id }}
+          path: |
+            playwright-report/
+            test-results/
+            results.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload Videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-only-${{ inputs.execution_id }}
+          path: test-results/**/video.webm
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-only-${{ inputs.execution_id }}
+          path: test-results/**/*.png
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Upload Traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: traces-only-${{ inputs.execution_id }}
+          path: test-results/**/*.zip
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: Parse Results and Post to Backend
+        if: always()
+        run: |
+          echo "Parsing test results..."
+
+          if [ -f results.json ]; then
+            node -e "
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('results.json', 'utf-8'));
+
+            // Recursively walk all suites (Playwright nests specs inside sub-suites)
+            let totalTests = 0;
+            let passedTests = 0;
+            let failedTests = 0;
+            let skippedTests = 0;
+
+            function walkSuite(suite) {
+              for (const spec of (suite.specs || [])) {
+                totalTests++;
+                const lastTest = spec.tests?.[spec.tests.length - 1];
+                const lastResult = lastTest?.results?.[lastTest.results.length - 1];
+                if (lastResult) {
+                  if (lastResult.status === 'passed' || lastResult.status === 'expected') passedTests++;
+                  else if (lastResult.status === 'failed' || lastResult.status === 'unexpected') failedTests++;
+                  else if (lastResult.status === 'skipped') skippedTests++;
+                }
+              }
+              for (const child of (suite.suites || [])) { walkSuite(child); }
+            }
+
+            if (results.suites) { results.suites.forEach(walkSuite); }
+
+            const status = totalTests > 0 ? 'completed' : 'failed';
+
+            const payload = {
+              status,
+              totalTests,
+              passedTests,
+              failedTests,
+              skippedTests,
+              artifactsUrl: 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+              resultsJson: JSON.stringify(results)
+            };
+
+            console.log('Test Results:');
+            console.log(JSON.stringify({ status, totalTests, passedTests, failedTests, skippedTests }, null, 2));
+
+            fs.writeFileSync('callback-payload.json', JSON.stringify(payload));
+            " || echo '{\"status\":\"failed\",\"totalTests\":0,\"passedTests\":0,\"failedTests\":0,\"skippedTests\":0}' > callback-payload.json
+          else
+            echo "results.json not found, creating empty results"
+            echo '{"status":"failed","totalTests":0,"passedTests":0,"failedTests":0,"skippedTests":0}' > callback-payload.json
+          fi
+
+          echo "Posting results to backend..."
+          HTTP_CODE=$(curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.TAP_API_KEY }}" \
+            -d @callback-payload.json \
+            -w "%{http_code}" \
+            -o callback-response.json \
+            "${{ secrets.TAP_API_URL }}/api/automation-executions/${{ inputs.execution_id }}/github-callback")
+
+          echo "HTTP Status: $HTTP_CODE"
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "Results posted to backend successfully"
+          else
+            echo "Warning: Callback returned HTTP $HTTP_CODE"
+          fi
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${{ secrets.TAP_API_KEY }}" \
+            -d '{"step":7,"totalSteps":7,"status":"completed","description":"Execution complete"}' \
+            "${{ secrets.TAP_API_URL }}/api/automation-executions/${{ inputs.execution_id }}/workflow-step" || true
+
+      - name: Generate Summary
+        if: always()
+        run: |
+          echo "## Playwright Test Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Execution ID:** \`${{ inputs.execution_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Test Cycle ID:** \`${{ inputs.test_cycle_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f callback-payload.json ]; then
+            echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+            node -e "
+            const results = JSON.parse(require('fs').readFileSync('callback-payload.json', 'utf-8'));
+            console.log('- **Status:** ' + results.status.toUpperCase());
+            console.log('- **Total Tests:** ' + results.totalTests);
+            console.log('- **Passed:** ' + results.passedTests);
+            console.log('- **Failed:** ' + results.failedTests);
+            console.log('- **Skipped:** ' + results.skippedTests);
+            " >> $GITHUB_STEP_SUMMARY
+          fi

@@ -1,0 +1,22 @@
+# TAP runtime files (injected at execution time)
+tap-reporter.ts
+
+# Dependencies
+node_modules/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+results.json
+
+# Build output
+dist/
+
+# Authentication storage
+authentication/
+
+# Environment
+.env
+.DS_Store

@@ -1,0 +1,15 @@
+{
+  "files.readonlyInclude": {
+    "package.json": true,
+    "playwright.config.ts": true,
+    "tsconfig.json": true,
+    ".gitignore": true,
+    ".github/workflows/execute-playwright-tests.yml": true,
+    "src/utils/tap-db.ts": true,
+    "src/utils/data-loader.ts": true,
+    ".vscode/settings.json": true,
+    "scripts/install-tap-hooks.ts": true
+  },
+  "files.readonlyFromPermissions": true,
+  "explorer.sortOrder": "type"
+}
