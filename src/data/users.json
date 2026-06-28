@@ -1,5 +1,5 @@
-{ "validUsers": [ { "username": "testuser1", "password": "ENV:PASSWORD_TESTUSER1", "role": "admin",
-"displayName": "Test Admin" }, { "username": "testuser2", "password": "ENV:PASSWORD_TESTUSER2",
-"role": "viewer", "displayName": "Test Viewer" } ], "invalidUsers": [ { "username": "baduser",
-"password": "wrong-password", "expectedError": "Invalid credentials" }, { "username": "",
-"password": "", "expectedError": "Username is required" } ] }
+{
+  "": {
+    "vikram311991@gmail.com": "ENV:VIKRAM311991_GMAIL_COM"
+  }
+}
