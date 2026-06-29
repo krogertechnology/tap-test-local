@@ -7,6 +7,7 @@
     ".github/workflows/execute-playwright-tests.yml": true,
     "src/utils/tap-db.ts": true,
     "src/utils/data-loader.ts": true,
+    "src/utils/tap-test-filter.ts": true,
     ".vscode/settings.json": true,
     "scripts/install-tap-hooks.ts": true
   },

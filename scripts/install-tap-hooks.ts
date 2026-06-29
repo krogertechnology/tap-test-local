@@ -27,6 +27,7 @@ const PROTECTED = [
   '.github/workflows/execute-playwright-tests.yml',
   'src/utils/tap-db.ts',
   'src/utils/data-loader.ts',
+  'src/utils/tap-test-filter.ts',
   '.vscode/settings.json',
   'scripts/install-tap-hooks.ts',
 ];

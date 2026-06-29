@@ -1,14 +1,25 @@
 name: Execute Playwright Tests
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Group-based execution (no test cycles).
+#
+# TAP triggers this workflow with only `execution_id` + per-run tuning knobs.
+# The workflow then calls back to
+#   GET $TAP_API_URL/api/automation-executions/$EXECUTION_ID/run-plan
+# to fetch the snapshot of resolved test cases (computed when the execution
+# was started from the selected Automation Test Groups) and materialises it
+# as `.tap-execution.json` in the workspace root.
+#
+# The scaffolded `playwright.config.ts` reads `TAP_TEST_FILTER` and uses
+# `testIgnore` to skip every spec file that isn't in the manifest. Test-level
+# filtering (for multi-test files) is opt-in via `src/utils/tap-test-filter.ts`.
+# ──────────────────────────────────────────────────────────────────────────────
+
 on:
   workflow_dispatch:
     inputs:
       execution_id:
-        description: 'Test Execution ID'
-        required: true
-        type: string
-      test_cycle_id:
-        description: 'Test Cycle ID'
+        description: 'TAP Automation Execution ID'
         required: true
         type: string
       workers:
@@ -76,6 +87,21 @@ on:
         required: false
         default: 'main'
         type: string
+
+# Per-execution concurrency group.
+#
+# Each TAP Automation Execution gets its own group keyed on `execution_id`,
+# so unrelated executions NEVER block each other — even with the same project,
+# same group selection, same branch. Unlimited parallelism across executions
+# is a hard requirement of the group-based model.
+#
+# `cancel-in-progress: false` is deliberate: if (somehow) two workflows are
+# dispatched for the same execution id (e.g. accidental re-trigger), we let
+# the first finish rather than killing it mid-run. TAP's own start-execution
+# path guards against duplicate dispatches; this is a defence-in-depth knob.
+concurrency:
+  group: tap-execution-${{ inputs.execution_id }}
+  cancel-in-progress: false
 
 jobs:
   # Layer 2 of scaffold integrity enforcement (defense in depth).
@@ -157,37 +183,54 @@ jobs:
             -d '{"step":2,"totalSteps":7,"status":"completed","description":"Node.js configured"}' \
             "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
 
-      - name: Fetch Test File List for Cycle
+      - name: Fetch TAP Run Plan
+        # Pull the snapshot run-plan for this execution and write it to
+        # `.tap-execution.json`. The scaffolded `playwright.config.ts`
+        # reads the manifest via the TAP_TEST_FILTER env var (set on the
+        # Execute Playwright Tests step below) and uses `testIgnore` to
+        # skip every spec file that isn't in it.
+        #
+        # FAIL FAST: if the manifest can't be fetched we abort. Running
+        # the whole suite when the user asked for a specific group set
+        # would be the wrong default — it would surface as "every test
+        # passed/failed" results in TAP with no obvious cause.
         env:
           TAP_API_URL: ${{ secrets.TAP_API_URL }}
           TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
-          TEST_CYCLE_ID: ${{ inputs.test_cycle_id }}
           EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
-          echo "Fetching test file list for cycle $TEST_CYCLE_ID..."
-          RESPONSE=$(curl -sf -H "Authorization: Bearer $TAP_API_KEY" \
-            "$TAP_API_URL/api/automation-executions/cycle/$TEST_CYCLE_ID/test-files")
+          echo "Fetching TAP run plan for execution $EXECUTION_ID..."
+          HTTP=$(curl -sS -w "\n%{http_code}" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/run-plan")
+          BODY=$(printf '%s' "$HTTP" | sed '$d')
+          CODE=$(printf '%s' "$HTTP" | tail -n1)
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Failed to fetch run plan (HTTP $CODE)"
+            echo "$BODY"
+            exit 1
+          fi
 
-          if [ $? -ne 0 ]; then
-            echo "Warning: Failed to fetch test files for cycle, will run all tests"
-            echo "TAP_TEST_FILES=" >> $GITHUB_ENV
-          else
-            # Extract .spec.ts file paths from the JSON response
-            TEST_FILES=$(echo "$RESPONSE" | node -e "
-              const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
-              const paths = (data.files || [])
-                .map(f => f.path)
-                .filter(p => p.endsWith('.spec.ts'));
-              process.stdout.write(paths.join(' '));
-            ")
-            echo "Found $(echo "$TEST_FILES" | wc -w | tr -d ' ') test file(s) for cycle"
-            echo "TAP_TEST_FILES=$TEST_FILES" >> $GITHUB_ENV
+          # Extract the `manifest` array — that's the on-disk JSON shape
+          # `playwright.config.ts` + `src/utils/tap-test-filter.ts` consume.
+          # Includes `file`, `title`, `testCaseId` per entry.
+          printf '%s' "$BODY" | node -e "
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf-8'));
+            const manifest = Array.isArray(data.manifest) ? data.manifest : [];
+            fs.writeFileSync('.tap-execution.json', JSON.stringify(manifest));
+            console.log('Wrote .tap-execution.json with ' + manifest.length + ' test(s) across ' + new Set(manifest.map(m => m.file)).size + ' file(s).');
+          "
+
+          if [ ! -s .tap-execution.json ]; then
+            echo "::error::.tap-execution.json is empty after writing — refusing to run"
+            exit 1
           fi
 
           curl -sf -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $TAP_API_KEY" \
-            -d '{"step":3,"totalSteps":7,"status":"completed","description":"Test files fetched"}' \
+            -d '{"step":3,"totalSteps":7,"status":"completed","description":"Run plan fetched"}' \
             "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
 
       - name: Configure npm registry (JFrog)
@@ -264,6 +307,11 @@ jobs:
           TAP_BASE_URL: ${{ inputs.base_url }}
           TAP_TEST_SECRETS: ${{ inputs.test_secrets }}
           TAP_DATA_FOLDER: ${{ inputs.data_folder }}
+          # Path to the manifest written by the "Fetch TAP Run Plan" step.
+          # Consumed by:
+          #   - `playwright.config.ts` (file-level `testIgnore`)
+          #   - `src/utils/tap-test-filter.ts` (opt-in per-test skip helper)
+          TAP_TEST_FILTER: .tap-execution.json
         run: |
           curl -sf -X POST \
             -H "Content-Type: application/json" \
@@ -275,14 +323,13 @@ jobs:
           BROWSERS_JSON=$(echo "$TAP_BROWSERS" | tr ' ' '\n' | sed 's/.*/"&"/' | paste -sd ',' - | sed 's/^/[/' | sed 's/$/]/')
           export TAP_BROWSERS="$BROWSERS_JSON"
 
-          echo "Starting test execution (workers: $TAP_WORKERS, browsers: $BROWSERS_JSON)..."
-          if [ -n "$TAP_TEST_FILES" ]; then
-            echo "Running $(echo "$TAP_TEST_FILES" | wc -w | tr -d ' ') specific test files"
-            npx playwright test $TAP_TEST_FILES --workers=${{ inputs.workers || '1' }}
-          else
-            echo "Running all tests"
-            npx playwright test --workers=${{ inputs.workers || '1' }}
-          fi
+          echo "Starting test execution (workers: $TAP_WORKERS, browsers: $BROWSERS_JSON, manifest: $TAP_TEST_FILTER)"
+          # No file-list arg here — the manifest + playwright.config.ts
+          # `testIgnore` predicate together do the selection. This keeps a
+          # single source of truth for "which tests run" and avoids the
+          # 4096-char workflow-input limit that capped the old cycle-based
+          # flow at ~250 specs.
+          npx playwright test --workers=${{ inputs.workers || '1' }}
           TEST_EXIT_CODE=$?
           echo "exit_code=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
           exit $TEST_EXIT_CODE
@@ -408,8 +455,19 @@ jobs:
           echo "## Playwright Test Execution Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Execution ID:** \`${{ inputs.execution_id }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Test Cycle ID:** \`${{ inputs.test_cycle_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ inputs.branch || 'main' }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f .tap-execution.json ]; then
+            MANIFEST_SUMMARY=$(node -e "
+              const m = JSON.parse(require('fs').readFileSync('.tap-execution.json', 'utf-8'));
+              const files = new Set(m.map(e => e.file));
+              console.log('- **Manifest:** ' + m.length + ' test(s) across ' + files.size + ' file(s)');
+            ")
+            echo "### Run Plan" >> $GITHUB_STEP_SUMMARY
+            echo "$MANIFEST_SUMMARY" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
 
           if [ -f callback-payload.json ]; then
             echo "### Test Results" >> $GITHUB_STEP_SUMMARY

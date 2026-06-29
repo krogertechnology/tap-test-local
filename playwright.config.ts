@@ -1,4 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
+import fs from 'fs';
+import path from 'path';
 
 // Dynamic configuration from TAP
 const selectedBrowsers: string[] = JSON.parse(process.env.TAP_BROWSERS || '["chromium"]');
@@ -55,6 +57,79 @@ const projects = selectedBrowsers.map((browser) => ({
   },
 }));
 
+// ---------------------------------------------------------------------------
+// TAP_TEST_FILTER — manifest-driven, group-based selection.
+//
+// TAP writes a JSON manifest into the workspace at the path given by
+// $TAP_TEST_FILTER. The manifest is an array of {file, title?, testCaseId}.
+//
+//   - `testIgnore` (file-level): every spec file that isn't in the manifest
+//     is skipped before Playwright even loads it. This is O(file count) and
+//     scales to 1000+ specs because Playwright never imports the excluded
+//     files.
+//
+//   - `tap-test-filter.ts` (test-level): `skipIfNotInTapFilter()` runs in
+//     each spec's `test.beforeEach` and skips individual `test()` blocks
+//     whose title isn't in the manifest. O(1) per test (Set lookup).
+//
+// When `$TAP_TEST_FILTER` is unset (developer running `npx playwright test`
+// locally), both filters short-circuit and every test runs as before.
+// ---------------------------------------------------------------------------
+const TEST_DIR = path.resolve(__dirname, 'src/tests');
+
+function loadTapFilter(): { files: Set<string> } | null {
+  const filterPath = process.env.TAP_TEST_FILTER;
+  if (!filterPath) return null;
+
+  try {
+    const raw = fs.readFileSync(filterPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      console.warn(`[TAP] TAP_TEST_FILTER at ${filterPath} is not a JSON array — running all tests`);
+      return null;
+    }
+    const files = new Set<string>();
+    for (const entry of parsed) {
+      if (entry && typeof entry.file === 'string' && entry.file.length > 0) {
+        // Normalise to POSIX-style relative path; testIgnore matches the path
+        // as Playwright reports it.
+        files.add(entry.file.replace(/\\/g, '/'));
+      }
+    }
+    console.log(
+      `[TAP] TAP_TEST_FILTER active — ${files.size} spec file(s), ${parsed.length} test(s)`,
+    );
+    return { files };
+  } catch (err) {
+    console.warn(`[TAP] Failed to read TAP_TEST_FILTER at ${filterPath}: ${(err as Error).message}`);
+    return null;
+  }
+}
+
+const tapFilter = loadTapFilter();
+
+/**
+ * testIgnore predicate. Returns true when the given absolute spec path is
+ * NOT listed in the manifest, so Playwright skips loading the file entirely.
+ *
+ * Without a filter, returns false (don't ignore anything).
+ */
+function shouldIgnoreSpec(testPath: string): boolean {
+  if (!tapFilter) return false;
+
+  // Compute the spec path relative to the test root and normalise separators.
+  let rel = path.relative(TEST_DIR, testPath).replace(/\\/g, '/');
+  // The manifest may store paths rooted at the repo (e.g. 'src/tests/foo.spec.ts')
+  // OR rooted at testDir (e.g. 'foo.spec.ts'). Accept either; check both forms.
+  const rootedAtRepo = path
+    .relative(path.resolve(__dirname), testPath)
+    .replace(/\\/g, '/');
+
+  if (tapFilter.files.has(rel)) return false;
+  if (tapFilter.files.has(rootedAtRepo)) return false;
+  return true;
+}
+
 export default defineConfig({
   testDir: './src/tests',
   fullyParallel: workerCount > 1,
@@ -66,6 +141,10 @@ export default defineConfig({
   expect: {
     timeout: expectTimeout,
   },
+  // File-level filter — Playwright will not even load specs that aren't in
+  // the TAP manifest. Always-on when TAP_TEST_FILTER is set; otherwise the
+  // predicate returns false and every file runs.
+  testIgnore: shouldIgnoreSpec,
   reporter: [
     ['json', { outputFile: 'results.json' }],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
