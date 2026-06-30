@@ -225,7 +225,8 @@ export function skipIfNotInTapFilter(testInfo: TestInfo): void {
   // and the *test case title* lives in a parent describe.
   //
   // To match either authoring style we accept a hit on any segment of the
-  // full title path: `testInfo.titlePath()` returns
+  // full title path: `testInfo.titlePath` (a string[] PROPERTY on TestInfo,
+  // not the method that lives on Suite) returns
   //   ['', '<project name>', '<describe 1>', …, '<test title>']
   // and we also accept arbitrarily-deep `test.describe` nesting joined with
   // " > " (matches Playwright's own list reporter format). This makes the
@@ -233,7 +234,16 @@ export function skipIfNotInTapFilter(testInfo: TestInfo): void {
   //   • flat `test(<case title>, …)`                       — manifest matches innerTitle
   //   • `test.describe(<case title>, () => test(<step>, …))` — manifest matches a path segment
   //   • nested describes (Suite > Feature > <case title>)   — manifest matches a path segment
-  const titlePath = testInfo.titlePath();
+  //
+  // Defensive: older Playwright versions or future API changes might expose
+  // it as a function; fall back gracefully if so and ultimately to just the
+  // inner title.
+  const rawTitlePath = (testInfo as { titlePath: string[] | (() => string[]) }).titlePath;
+  const titlePath: string[] = Array.isArray(rawTitlePath)
+    ? rawTitlePath
+    : typeof rawTitlePath === 'function'
+      ? (rawTitlePath as () => string[]).call(testInfo)
+      : [testInfo.title];
   const titleCandidates = new Set<string>();
   titleCandidates.add(testInfo.title);
   for (const segment of titlePath) {
