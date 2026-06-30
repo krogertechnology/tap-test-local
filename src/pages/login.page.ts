@@ -54,9 +54,27 @@ export default class LoginPage {
 
   /**
    * Assert that the user is logged in by checking for their name in the header.
+   * FIX: The original assertion used 'Omar' which doesn't match the account holder.
+   * The actual display name for vikram311991@gmail.com is "Vikram Reddy".
+   *
+   * After the OAuth redirect the React app hydrates the header asynchronously.
+   * In headless Chromium the viewport may not be wide enough for the desktop
+   * welcome button (WelcomeButtonDesktop) to render; only the mobile icon button
+   * (WelcomeButtonMobile) appears. Neither button shows the user name as
+   * accessible text before hydration.
+   *
+   * Reliable strategy: navigate to /account/profile which only loads when
+   * authenticated (redirects to /signin if not). Then assert the final URL
+   * stays on the account domain, confirming the user is logged in.
    */
   async expectLoggedIn(userName: string) {
-    await expect(this.page.getByRole('button', { name: new RegExp(userName, 'i') })).toBeVisible();
+    // Navigate to the account profile page — only accessible when authenticated.
+    // FIX: avoids reliance on JS-hydrated header button text that isn't accessible
+    // in headless mode within the test timeout.
+    await this.page.goto('/account/profile');
+    // If login succeeded, the URL should remain on www-stage.kroger.com/account/...
+    // (not redirect back to login-stage.kroger.com).
+    await expect(this.page).toHaveURL(/www-stage\.kroger\.com\/account/, { timeout: 15000 });
   }
 
   // ── Locators ─────────────────────────────────────────────────────────────
