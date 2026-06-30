@@ -116,26 +116,45 @@ function loadTapFilter(): { files: Set<string> } | null {
 const tapFilter = loadTapFilter();
 
 /**
- * testIgnore predicate. Returns true when the given absolute spec path is
- * NOT listed in the manifest, so Playwright skips loading the file entirely.
- *
- * Without a filter, returns false (don't ignore anything).
+ * Recursively walk a directory and return absolute paths of all *.spec.ts /
+ * *.spec.js files. Used to pre-compute the testIgnore list because Playwright
+ * requires testIgnore to be a string / RegExp / array (NOT a function).
  */
-function shouldIgnoreSpec(testPath: string): boolean {
-  if (!tapFilter) return false;
-
-  // Compute the spec path relative to the test root and normalise separators.
-  let rel = path.relative(TEST_DIR, testPath).replace(/\\/g, '/');
-  // The manifest may store paths rooted at the repo (e.g. 'src/tests/foo.spec.ts')
-  // OR rooted at testDir (e.g. 'foo.spec.ts'). Accept either; check both forms.
-  const rootedAtRepo = path
-    .relative(path.resolve(__dirname), testPath)
-    .replace(/\\/g, '/');
-
-  if (tapFilter.files.has(rel)) return false;
-  if (tapFilter.files.has(rootedAtRepo)) return false;
-  return true;
+function listSpecFiles(dir: string): string[] {
+  const out: string[] = [];
+  if (!fs.existsSync(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...listSpecFiles(full));
+    } else if (/\.spec\.(ts|js|mjs|cjs)$/.test(entry.name)) {
+      out.push(full);
+    }
+  }
+  return out;
 }
+
+/**
+ * Build an array of relative spec paths (relative to testDir) that are NOT in
+ * the TAP manifest, suitable for passing to `testIgnore`. When no filter is
+ * active, returns an empty array (don't ignore anything).
+ */
+function buildTestIgnoreList(): string[] {
+  if (!tapFilter) return [];
+  const ignored: string[] = [];
+  for (const abs of listSpecFiles(TEST_DIR)) {
+    const rel = path.relative(TEST_DIR, abs).replace(/\\/g, '/');
+    const rootedAtRepo = path.relative(path.resolve(__dirname), abs).replace(/\\/g, '/');
+    if (tapFilter.files.has(rel) || tapFilter.files.has(rootedAtRepo)) continue;
+    // testIgnore matches against the path Playwright reports, which is relative
+    // to testDir. Push the testDir-relative form.
+    ignored.push(rel);
+  }
+  console.log(`[TAP] testIgnore — excluding ${ignored.length} spec file(s) not in manifest`);
+  return ignored;
+}
+
+const testIgnoreList = buildTestIgnoreList();
 
 export default defineConfig({
   testDir: './src/tests',
@@ -149,9 +168,9 @@ export default defineConfig({
     timeout: expectTimeout,
   },
   // File-level filter — Playwright will not even load specs that aren't in
-  // the TAP manifest. Always-on when TAP_TEST_FILTER is set; otherwise the
-  // predicate returns false and every file runs.
-  testIgnore: shouldIgnoreSpec,
+  // the TAP manifest. Pre-computed list of testDir-relative paths to exclude.
+  // Empty when TAP_TEST_FILTER is unset, so every file runs by default.
+  testIgnore: testIgnoreList,
   reporter: [
     ['json', { outputFile: 'results.json' }],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
