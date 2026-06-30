@@ -1,6 +1,13 @@
 import { defineConfig, devices } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+// The package is `"type": "module"`, so CommonJS `__dirname` is undefined.
+// Derive an ESM-safe equivalent from `import.meta.url` so the path
+// computations below work under Node ESM (GitHub Actions runner).
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Dynamic configuration from TAP
 const selectedBrowsers: string[] = JSON.parse(process.env.TAP_BROWSERS || '["chromium"]');

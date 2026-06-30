@@ -87,6 +87,23 @@ on:
         required: false
         default: 'main'
         type: string
+      tap_api_url:
+        description: |
+          (Local dev override) Base URL of the TAP backend the workflow should
+          call back to (e.g. http://localhost:3000). When left blank the repo
+          secret `TAP_API_URL` is used. Useful when running this workflow on a
+          self-hosted runner that lives on the same machine as a local backend.
+        required: false
+        default: ''
+        type: string
+      tap_api_key:
+        description: |
+          (Local dev override) Bearer token the workflow should send when
+          calling back to the TAP backend. When left blank the repo secret
+          `TAP_API_KEY` is used. Must match the local backend's `TOKEN_SECRET`.
+        required: false
+        default: ''
+        type: string
 
 # Per-execution concurrency group.
 #
@@ -114,8 +131,12 @@ jobs:
     steps:
       - name: Verify scaffold integrity
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          # Local-dev overrides win when non-empty; otherwise fall back to the
+          # repo-level secret. The cascade pattern
+          # `inputs.x != '' && inputs.x || secrets.X` is the recommended way
+          # to express "default" semantics inside a workflow expression.
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
         run: |
           PROJECT_ID="3004"
           if [ -z "$PROJECT_ID" ]; then
@@ -155,8 +176,8 @@ jobs:
       - name: Notify TAP - Checkout Complete
         continue-on-error: true
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
           EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
           curl -sf -X POST \
@@ -173,8 +194,8 @@ jobs:
       - name: Notify TAP - Node.js Ready
         continue-on-error: true
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
           EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
           curl -sf -X POST \
@@ -195,8 +216,8 @@ jobs:
         # would be the wrong default — it would surface as "every test
         # passed/failed" results in TAP with no obvious cause.
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
           EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
           echo "Fetching TAP run plan for execution $EXECUTION_ID..."
@@ -246,8 +267,8 @@ jobs:
 
       - name: Install Dependencies
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
           EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
           curl -sf -X POST \
@@ -267,8 +288,8 @@ jobs:
 
       - name: Download TAP Reporter
         env:
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
         run: |
           curl -f -H "Authorization: Bearer $TAP_API_KEY" \
             -o tap-reporter.ts \
@@ -293,8 +314,8 @@ jobs:
         continue-on-error: true
         env:
           EXECUTION_ID: ${{ inputs.execution_id }}
-          TAP_API_URL: ${{ secrets.TAP_API_URL }}
-          TAP_API_KEY: ${{ secrets.TAP_API_KEY }}
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
           TAP_WORKERS: ${{ inputs.workers || '1' }}
           TAP_BROWSERS: ${{ inputs.browsers || 'chromium' }}
           TAP_TIMEOUT: ${{ inputs.timeout || '30000' }}
@@ -375,6 +396,10 @@ jobs:
 
       - name: Parse Results and Post to Backend
         if: always()
+        env:
+          TAP_API_URL: ${{ inputs.tap_api_url != '' && inputs.tap_api_url || secrets.TAP_API_URL }}
+          TAP_API_KEY: ${{ inputs.tap_api_key != '' && inputs.tap_api_key || secrets.TAP_API_KEY }}
+          EXECUTION_ID: ${{ inputs.execution_id }}
         run: |
           echo "Parsing test results..."
 
@@ -430,11 +455,11 @@ jobs:
           echo "Posting results to backend..."
           HTTP_CODE=$(curl -X POST \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.TAP_API_KEY }}" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
             -d @callback-payload.json \
             -w "%{http_code}" \
             -o callback-response.json \
-            "${{ secrets.TAP_API_URL }}/api/automation-executions/${{ inputs.execution_id }}/github-callback")
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/github-callback")
 
           echo "HTTP Status: $HTTP_CODE"
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
@@ -445,9 +470,9 @@ jobs:
 
           curl -sf -X POST \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer ${{ secrets.TAP_API_KEY }}" \
+            -H "Authorization: Bearer $TAP_API_KEY" \
             -d '{"step":7,"totalSteps":7,"status":"completed","description":"Execution complete"}' \
-            "${{ secrets.TAP_API_URL }}/api/automation-executions/${{ inputs.execution_id }}/workflow-step" || true
+            "$TAP_API_URL/api/automation-executions/$EXECUTION_ID/workflow-step" || true
 
       - name: Generate Summary
         if: always()
