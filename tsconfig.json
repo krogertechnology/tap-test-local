@@ -11,6 +11,12 @@
     "forceConsistentCasingInFileNames": true,
     "outDir": "dist",
     "rootDir": ".",
+    // baseUrl is REQUIRED for `paths` to resolve at runtime. Without it,
+    // Playwright's TS transformer falls back to Node ESM resolution and
+    // raises `Cannot find package '@pages/...'` on the first import,
+    // which kills test load (0 tests start) on both GH Actions and the
+    // desktop runner.
+    "baseUrl": ".",
     "paths": {
       "@pages/*": ["./src/pages/*"],
       "@tests/*": ["./src/tests/*"],
