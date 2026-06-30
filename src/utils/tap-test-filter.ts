@@ -219,7 +219,47 @@ export function skipIfNotInTapFilter(testInfo: TestInfo): void {
   const allowedTitles = filter.titlesByFile.get(matchedFile);
   if (!allowedTitles || allowedTitles.size === 0) return;
 
-  if (!allowedTitles.has(testInfo.title)) {
+  // The TAP manifest stores `test_cases.title` — but the AI generator wraps
+  // each test in a `test.describe(<title>, () => { test(<description>, …) })`
+  // block, so `testInfo.title` is the *description* (the inner test() title)
+  // and the *test case title* lives in a parent describe.
+  //
+  // To match either authoring style we accept a hit on any segment of the
+  // full title path: `testInfo.titlePath()` returns
+  //   ['', '<project name>', '<describe 1>', …, '<test title>']
+  // and we also accept arbitrarily-deep `test.describe` nesting joined with
+  // " > " (matches Playwright's own list reporter format). This makes the
+  // filter resilient to:
+  //   • flat `test(<case title>, …)`                       — manifest matches innerTitle
+  //   • `test.describe(<case title>, () => test(<step>, …))` — manifest matches a path segment
+  //   • nested describes (Suite > Feature > <case title>)   — manifest matches a path segment
+  const titlePath = testInfo.titlePath();
+  const titleCandidates = new Set<string>();
+  titleCandidates.add(testInfo.title);
+  for (const segment of titlePath) {
+    if (segment && segment.length > 0) titleCandidates.add(segment);
+  }
+  // Joined-path forms (handle manifests authored against the reporter format).
+  const cleanPath = titlePath.filter((s) => s && s.length > 0);
+  if (cleanPath.length > 0) {
+    titleCandidates.add(cleanPath.join(' > '));
+    // Drop the project name (Playwright prepends it as the first segment when
+    // multiple projects are configured) and try again so users don't have to
+    // know whether their `projects:` array was non-empty when the test ran.
+    if (cleanPath.length > 1) {
+      titleCandidates.add(cleanPath.slice(1).join(' > '));
+    }
+  }
+
+  let matched = false;
+  for (const cand of titleCandidates) {
+    if (allowedTitles.has(cand)) {
+      matched = true;
+      break;
+    }
+  }
+
+  if (!matched) {
     testInfo.skip(
       true,
       `[TAP] Test "${testInfo.title}" is not in the TAP execution manifest for ${matchedFile}`,
