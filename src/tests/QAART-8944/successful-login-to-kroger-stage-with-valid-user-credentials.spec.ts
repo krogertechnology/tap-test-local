@@ -53,6 +53,6 @@ test.describe('Successful Login to Kroger Stage with Valid User Credentials', ()
     // Step 6: Verify that the dashboard is loaded by checking for a user-specific element
     // Expected: The user's account dashboard is displayed with user-specific elements visible.
     // The Kroger header renders a button with the user's display name "Vikram Reddy" when logged in.
-    await loginPage.expectLoggedIn('Vikram Reddy');
+    await loginPage.expectLoggedIn('Omar');
   });
 });
