@@ -13,6 +13,8 @@ test.describe('Successful Login to Kroger Stage with Valid User Credentials', ()
   });
 
   test('Validates that a registered Kroger user can log in with correct credentials and is redirected to their account dashboard.', async ({ page }) => {
+    // FIX: Increase timeout to account for OAuth redirect chain + React hydration latency.
+    test.setTimeout(90000);
     // Load credentials from users.json — passwords resolved via TAP_TEST_SECRETS at runtime
     const users = loadData<UsersData>('users.json');
     const username = 'vikram311991@gmail.com';
@@ -46,13 +48,17 @@ test.describe('Successful Login to Kroger Stage with Valid User Credentials', ()
 
     // Step 5: Wait for the login response and redirection
     // Expected: User is redirected to their account dashboard page.
-    // CIAM OAuth flow completes and redirects back to www-stage.kroger.com
-    await page.waitForURL(/www-stage\.kroger\.com/, { timeout: 30000 });
+    // CIAM OAuth flow completes and redirects back to www-stage.kroger.com.
+    // FIX: waitForURL matches the interim /connect-auth URL immediately; we must wait for
+    // the final redirect to finish (connect-auth processes the OAuth code and redirects to /).
+    await page.waitForURL(/www-stage\.kroger\.com\/(?!connect-auth)/, { timeout: 30000 });
     await expect(page).toHaveURL(/www-stage\.kroger\.com/);
 
     // Step 6: Verify that the dashboard is loaded by checking for a user-specific element
     // Expected: The user's account dashboard is displayed with user-specific elements visible.
     // The Kroger header renders a button with the user's display name "Vikram Reddy" when logged in.
-    await loginPage.expectLoggedIn('Omar');
+    // FIX: The previous assertion used 'Omar' which doesn't match the account holder; the actual
+    // display name shown in the header button is "Vikram Reddy" for vikram311991@gmail.com.
+    await loginPage.expectLoggedIn('Vikram Reddy');
   });
 });
