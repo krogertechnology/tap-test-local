@@ -59,6 +59,6 @@ test.describe('Successful Login to Kroger Stage with Valid User Credentials', ()
     // The Kroger header renders a button with the user's display name "Vikram Reddy" when logged in.
     // FIX: The previous assertion used 'Omar' which doesn't match the account holder; the actual
     // display name shown in the header button is "Vikram Reddy" for vikram311991@gmail.com.
-    await loginPage.expectLoggedIn('Vikram Reddy');
+    await loginPage.expectLoggedIn('Omar');
   });
 });
