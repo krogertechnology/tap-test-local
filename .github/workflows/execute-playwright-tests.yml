@@ -173,6 +173,23 @@ jobs:
           # "branch the tests are checked out from" if we ever need to.
           ref: ${{ inputs.branch || 'main' }}
 
+      - name: Verify Checked-Out Branch
+        # Surface the actual checked-out ref + SHA + commit metadata in a
+        # dedicated, always-expanded step. `actions/checkout@v4` does a
+        # detached-HEAD checkout (no friendly "Switched to branch ..."
+        # line) and collapses its own log group, which can make it look
+        # like the wrong branch was used even when it's correct. This
+        # step makes the actual checkout unambiguous in the run summary.
+        run: |
+          echo "Requested branch:  ${{ inputs.branch || 'main' }}"
+          echo "Checked-out SHA:   $(git rev-parse HEAD)"
+          echo "Short SHA:         $(git rev-parse --short HEAD)"
+          echo "Symbolic ref:      $(git name-rev --name-only HEAD 2>/dev/null || echo 'detached')"
+          echo "Remote tip(s) matching this SHA:"
+          git branch -r --contains HEAD || true
+          echo "---- HEAD commit ----"
+          git log -1 --pretty=format:'%h %s%n  by %an <%ae> on %ad' --date=iso
+
       - name: Notify TAP - Checkout Complete
         continue-on-error: true
         env:
